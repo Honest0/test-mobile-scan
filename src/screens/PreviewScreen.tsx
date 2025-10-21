@@ -827,6 +827,7 @@ const styles = StyleSheet.create({
     borderRadius: 16,
     overflow: 'hidden',
     marginBottom: 16,
+    flex: 1,
   },
   fullImage: {
     width: '100%',
