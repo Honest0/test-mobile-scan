@@ -6,6 +6,8 @@ import { useNavigation } from '@react-navigation/native';
 import type { NativeStackNavigationProp } from '@react-navigation/native-stack';
 import type { RootStackParamList } from '../../App';
 import { detectTextArea, analyzeTextDensity } from '../utils/imageUtils';
+import AutoDetectionBox from '../components/AutoDetectionBox';
+import { detectQuestionAreaFast, smoothBoxTransition, mapPreviewBoxToImageCoords, type DetectionRect } from '../utils/realtimeDetection';
 
 const { width: SCREEN_WIDTH, height: SCREEN_HEIGHT } = Dimensions.get('window');
 
@@ -16,6 +18,15 @@ export default function CameraScreen() {
   const [isReady, setIsReady] = useState(false);
   const [type] = useState(CameraType.back);
   const [autoMode, setAutoMode] = useState(true);
+  
+  // Auto-detection state
+  const [isAutoDetecting, setIsAutoDetecting] = useState(true);
+  const [detectedBox, setDetectedBox] = useState<DetectionRect | null>(null);
+  const [isBoxLocked, setIsBoxLocked] = useState(false);
+  const [isUserInteracting, setIsUserInteracting] = useState(false);
+  const detectionIntervalRef = useRef<NodeJS.Timeout | null>(null);
+  const lastDetectedBoxRef = useRef<DetectionRect | null>(null);
+  const manualBoxRef = useRef<DetectionRect | null>(null);
 
   useEffect(() => {
     if (!permission) return;
@@ -23,6 +34,98 @@ export default function CameraScreen() {
       requestPermission();
     }
   }, [permission]);
+
+  // Real-time detection loop - runs at 3 fps when auto-detecting
+  useEffect(() => {
+    if (!isReady || !isAutoDetecting || isBoxLocked || isUserInteracting) {
+      // Clear interval if conditions not met
+      if (detectionIntervalRef.current) {
+        clearInterval(detectionIntervalRef.current);
+        detectionIntervalRef.current = null;
+      }
+      return;
+    }
+
+    console.log('🎯 Starting real-time detection loop');
+    
+    // Calculate preview area (between top bar and bottom bar)
+    const previewTop = 120;
+    const previewBottom = 100;
+    const previewHeight = SCREEN_HEIGHT - previewTop - previewBottom;
+    const previewWidth = SCREEN_WIDTH;
+
+    // Threshold for movement - only update if change is significant
+    const POSITION_THRESHOLD = 5; // pixels
+    const SIZE_THRESHOLD = 10; // pixels
+
+    // Run detection at 3 fps
+    const runDetection = () => {
+      try {
+        // If user has manually adjusted, keep that box
+        if (manualBoxRef.current) {
+          setDetectedBox(manualBoxRef.current);
+          return;
+        }
+
+        // Fast heuristic-based detection
+        const newBox = detectQuestionAreaFast(previewWidth, previewHeight, {
+          verticalBias: 0.18,  // 18% from top - questions are usually in upper area
+          widthRatio: 0.65,    // 65% width - most questions don't span full width
+          heightRatio: 0.10,   // 10% height - compact for single-line questions
+        });
+        
+        // Adjust for top offset
+        const adjustedBox = {
+          ...newBox,
+          y: newBox.y + previewTop,
+        };
+
+        // Check if change is significant enough to update
+        if (lastDetectedBoxRef.current) {
+          const deltaX = Math.abs(adjustedBox.x - lastDetectedBoxRef.current.x);
+          const deltaY = Math.abs(adjustedBox.y - lastDetectedBoxRef.current.y);
+          const deltaW = Math.abs(adjustedBox.width - lastDetectedBoxRef.current.width);
+          const deltaH = Math.abs(adjustedBox.height - lastDetectedBoxRef.current.height);
+
+          // Only update if changes exceed threshold
+          if (
+            deltaX < POSITION_THRESHOLD &&
+            deltaY < POSITION_THRESHOLD &&
+            deltaW < SIZE_THRESHOLD &&
+            deltaH < SIZE_THRESHOLD
+          ) {
+            // Change too small, keep current box
+            return;
+          }
+        }
+
+        // Apply smoothing to prevent jitter (less aggressive than before)
+        const smoothedBox = smoothBoxTransition(
+          lastDetectedBoxRef.current,
+          adjustedBox,
+          0.4 // Higher smoothing factor for more stability
+        );
+
+        lastDetectedBoxRef.current = smoothedBox;
+        setDetectedBox(smoothedBox);
+      } catch (error) {
+        console.error('❌ Detection error:', error);
+      }
+    };
+
+    // Run immediately
+    runDetection();
+
+    // Then run every 333ms (3 fps)
+    detectionIntervalRef.current = setInterval(runDetection, 333);
+
+    return () => {
+      if (detectionIntervalRef.current) {
+        clearInterval(detectionIntervalRef.current);
+        detectionIntervalRef.current = null;
+      }
+    };
+  }, [isReady, isAutoDetecting, isBoxLocked, isUserInteracting]);
 
   const onCapture = useCallback(async () => {
     if (!cameraRef.current) {
@@ -33,9 +136,9 @@ export default function CameraScreen() {
     try {
       let photo = await cameraRef.current.takePictureAsync({
         quality: 1.0,
-        base64: true, // Need base64 for pixel analysis
+        base64: false, // Don't need base64 anymore since we're using detected box
         exif: true,
-        skipProcessing: false, // Let expo-camera process the image correctly
+        skipProcessing: false,
       });
       console.log('✅ Photo captured successfully');
       
@@ -53,44 +156,108 @@ export default function CameraScreen() {
       
       const { width: photoWidth, height: photoHeight } = photo;
       
-      // Analyze the image to find the area with the most text density
-      console.log('🔍 Analyzing image for text density...');
-      const textDensityResult = await analyzeTextDensity(
-        photo.uri,
-        photoWidth,
-        photoHeight,
-        SCREEN_WIDTH,
-        SCREEN_HEIGHT
-      );
+      // Use detected box if available, otherwise fall back to default
+      let cropRect: { originX: number; originY: number; width: number; height: number } | null = null;
       
-      if (textDensityResult) {
-        console.log('✨ Text-dense area detected!', textDensityResult);
-        navigation.navigate('Preview', { 
-          photo: { uri: photo.uri, width: photoWidth, height: photoHeight },
-          crop: textDensityResult
-        });
-      } else {
-        // Fallback to heuristic detection if analysis fails
-        console.log('⚠️ Using fallback detection');
-        const autoCrop = detectTextArea(SCREEN_WIDTH, SCREEN_HEIGHT, {
-          topOffset: 120,
-          bottomOffset: 120,
-          widthRatio: 0.85,
-          heightRatio: 0.4,
-          verticalPosition: 'upper-center'
-        });
+      // Use manual box if user adjusted it, otherwise use detected box
+      const boxToUse = manualBoxRef.current || detectedBox;
+      
+      if (boxToUse && isAutoDetecting) {
+        console.log('📦 Using box for cropping:', boxToUse, manualBoxRef.current ? '(manual)' : '(auto)');
         
-        navigation.navigate('Preview', { 
-          photo: { uri: photo.uri, width: photoWidth, height: photoHeight },
-          crop: autoCrop
-        });
+        // Calculate preview area dimensions
+        const previewTop = 120;
+        const previewBottom = 100;
+        const previewHeight = SCREEN_HEIGHT - previewTop - previewBottom;
+        const previewWidth = SCREEN_WIDTH;
+        
+        // Calculate how the camera image is actually displayed in the preview
+        // The camera view is full screen, so we need to map directly to the full image
+        const photoAspect = photoWidth / photoHeight;
+        const previewAspect = SCREEN_WIDTH / SCREEN_HEIGHT;
+        
+        let scaleX: number;
+        let scaleY: number;
+        let offsetX = 0;
+        let offsetY = 0;
+        
+        if (photoAspect > previewAspect) {
+          // Photo is wider - fits to height, crops width
+          scaleY = photoHeight / SCREEN_HEIGHT;
+          scaleX = scaleY;
+          offsetX = (photoWidth - (SCREEN_WIDTH * scaleX)) / 2;
+        } else {
+          // Photo is taller - fits to width, crops height
+          scaleX = photoWidth / SCREEN_WIDTH;
+          scaleY = scaleX;
+          offsetY = (photoHeight - (SCREEN_HEIGHT * scaleY)) / 2;
+        }
+        
+        // Map box coordinates from screen to photo coordinates
+        cropRect = {
+          originX: Math.round((boxToUse.x * scaleX) + offsetX),
+          originY: Math.round((boxToUse.y * scaleY) + offsetY),
+          width: Math.round(boxToUse.width * scaleX),
+          height: Math.round(boxToUse.height * scaleY),
+        };
+        
+        // Ensure crop rect is within image bounds
+        cropRect.originX = Math.max(0, Math.min(cropRect.originX, photoWidth - cropRect.width));
+        cropRect.originY = Math.max(0, Math.min(cropRect.originY, photoHeight - cropRect.height));
+        cropRect.width = Math.min(cropRect.width, photoWidth - cropRect.originX);
+        cropRect.height = Math.min(cropRect.height, photoHeight - cropRect.originY);
+        
+        console.log('✂️ Mapped crop rect:', cropRect);
+        console.log('📐 Photo aspect:', photoAspect.toFixed(2), 'Preview aspect:', previewAspect.toFixed(2));
+        console.log('📐 Scale:', scaleX.toFixed(2), 'x', scaleY.toFixed(2), 'Offset:', offsetX.toFixed(0), ',', offsetY.toFixed(0));
       }
+      
+      // Crop the image if we have a crop rect
+      let finalPhotoUri = photo.uri;
+      if (cropRect && cropRect.width > 0 && cropRect.height > 0) {
+        try {
+          console.log('✂️ Cropping image with rect:', cropRect);
+          const croppedPhoto = await ImageManipulator.manipulateAsync(
+            photo.uri,
+            [{ crop: cropRect }],
+            { compress: 0.9, format: ImageManipulator.SaveFormat.JPEG }
+          );
+          finalPhotoUri = croppedPhoto.uri;
+          console.log('✅ Image cropped successfully');
+        } catch (cropError) {
+          console.error('❌ Failed to crop image:', cropError);
+          // Continue with uncropped image
+        }
+      }
+      
+      // Navigate to preview with the cropped image
+      navigation.navigate('Preview', { 
+        photo: { uri: finalPhotoUri, width: photoWidth, height: photoHeight },
+        crop: null // Already cropped, no need for further cropping
+      });
+      
     } catch (e: any) {
       console.error('❌ Failed to take picture:', e);
       Alert.alert('Error', 'Failed to capture photo: ' + (e.message || 'Unknown error'));
     }
-  }, [navigation]);
+  }, [navigation, detectedBox, isAutoDetecting]);
 
+  // Handlers for user interaction with detection box
+  const handleInteractionStart = useCallback(() => {
+    console.log('👆 User started interacting with box - pausing detection');
+    setIsUserInteracting(true);
+  }, []);
+
+  const handleInteractionEnd = useCallback(() => {
+    console.log('✋ User finished interacting with box - resuming detection');
+    setIsUserInteracting(false);
+  }, []);
+
+  const handleBoxChange = useCallback((newBox: DetectionRect) => {
+    console.log('📐 User manually adjusted box:', newBox);
+    manualBoxRef.current = newBox;
+    setDetectedBox(newBox);
+  }, []);
 
   if (!permission) {
     return <View style={styles.center}><ActivityIndicator color="#fff" /></View>;
@@ -133,9 +300,42 @@ export default function CameraScreen() {
         </TouchableOpacity>
       </View>
 
-      {/* Semi-transparent document area overlay */}
-      <View style={styles.documentArea}>
-        {/* Flash control (floating above shutter) */}
+      {/* Auto-detection toggle button */}
+      <View style={styles.autoDetectToggleContainer}>
+        <TouchableOpacity 
+          style={[styles.autoDetectButton, isAutoDetecting && styles.autoDetectButtonActive]}
+          onPress={() => {
+            const newState = !isAutoDetecting;
+            setIsAutoDetecting(newState);
+            if (newState) {
+              // Turning auto-detection ON - clear manual box to restart auto-detection
+              manualBoxRef.current = null;
+              lastDetectedBoxRef.current = null;
+              setIsBoxLocked(false);
+            }
+          }}
+        >
+          <Text style={styles.autoDetectIcon}>{isAutoDetecting ? '🎯' : '📐'}</Text>
+          <Text style={styles.autoDetectText}>
+            {isAutoDetecting ? 'Auto' : 'Manual'}
+          </Text>
+        </TouchableOpacity>
+      </View>
+
+      {/* Real-time auto-detection box */}
+      <AutoDetectionBox
+        detectedBox={detectedBox}
+        isLocked={isBoxLocked}
+        isAutoDetecting={isAutoDetecting}
+        containerWidth={SCREEN_WIDTH}
+        containerHeight={SCREEN_HEIGHT}
+        onInteractionStart={handleInteractionStart}
+        onInteractionEnd={handleInteractionEnd}
+        onBoxChange={handleBoxChange}
+      />
+
+      {/* Flash control (floating above shutter) */}
+      <View style={styles.flashButtonContainer}>
         <TouchableOpacity style={styles.flashButton}>
           <Text style={styles.flashIcon}>⭐</Text>
         </TouchableOpacity>
@@ -197,24 +397,7 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
-    zIndex: 10,
-    ...(Platform.OS === 'android' && {
-      transform: [{ scaleY: -1 }],
-    }),
-  },
-  
-  // Document area overlay - full width
-  documentArea: {
-    position: 'absolute',
-    top: 120,
-    left: 0,
-    right: 0,
-    bottom: 120,
-    backgroundColor: 'rgba(255, 255, 255, 0.1)',
-    borderRadius: 20,
-    borderWidth: 2,
-    borderColor: '#67e8f9', // Light blue border
-    zIndex: 5,
+    zIndex: 15,
     ...(Platform.OS === 'android' && {
       transform: [{ scaleY: -1 }],
     }),
@@ -249,22 +432,64 @@ const styles = StyleSheet.create({
     fontWeight: '600',
   },
   
-  // Flash control (floating above shutter)
-  flashButton: {
+  // Auto-detection toggle
+  autoDetectToggleContainer: {
     position: 'absolute',
-    bottom: 20,
-    left: '50%',
-    marginLeft: -15,
-    width: 30,
-    height: 30,
-    borderRadius: 15,
-    backgroundColor: 'rgba(0,0,0,0.3)',
+    top: 120,
+    left: 20,
+    zIndex: 15,
+    ...(Platform.OS === 'android' && {
+      transform: [{ scaleY: -1 }],
+    }),
+  },
+  autoDetectButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: 'rgba(0, 0, 0, 0.6)',
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    borderRadius: 20,
+    borderWidth: 2,
+    borderColor: '#fff',
+  },
+  autoDetectButtonActive: {
+    backgroundColor: 'rgba(20, 184, 166, 0.9)',
+    borderColor: '#14b8a6',
+  },
+  autoDetectIcon: {
+    fontSize: 16,
+    marginRight: 6,
+  },
+  autoDetectText: {
+    fontSize: 13,
+    color: '#fff',
+    fontWeight: '600',
+  },
+  
+  // Flash control (floating above shutter)
+  flashButtonContainer: {
+    position: 'absolute',
+    bottom: 120,
+    left: 0,
+    right: 0,
+    alignItems: 'center',
+    zIndex: 12,
+    ...(Platform.OS === 'android' && {
+      transform: [{ scaleY: -1 }],
+    }),
+  },
+  flashButton: {
+    width: 44,
+    height: 44,
+    borderRadius: 22,
+    backgroundColor: 'rgba(0,0,0,0.5)',
     justifyContent: 'center',
     alignItems: 'center',
-    zIndex: 15,
+    borderWidth: 2,
+    borderColor: 'rgba(255,255,255,0.3)',
   },
   flashIcon: {
-    fontSize: 16,
+    fontSize: 20,
     color: '#ffd700',
   },
   
@@ -308,16 +533,21 @@ const styles = StyleSheet.create({
     width: 80,
     height: 80,
     borderRadius: 40,
-    borderWidth: 4,
-    borderColor: '#14b8a6',
+    borderWidth: 5,
+    borderColor: '#ffffff',
     justifyContent: 'center',
     alignItems: 'center',
     backgroundColor: 'transparent',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.3,
+    shadowRadius: 4,
+    elevation: 5,
   },
   shutterInner: {
-    width: 60,
-    height: 60,
-    borderRadius: 30,
+    width: 64,
+    height: 64,
+    borderRadius: 32,
     backgroundColor: '#14b8a6',
   },
   

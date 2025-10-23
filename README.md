@@ -1,15 +1,43 @@
 # Scan Crop Demo
 
-A React Native app that captures photos and provides intelligent auto-detection and manual adjustment of question areas for cropping. Built with Expo and TypeScript.
+A React Native app that captures photos and provides **real-time auto-detection** of question areas with live preview, similar to Brainly. Built with Expo and TypeScript.
+
+## 🆕 What's New - Real-Time Auto-Detection
+
+The app now features **live detection** that shows a hovering detection box over the camera preview *before* you take a photo! As you move your camera, the app automatically tracks and highlights potential question areas in real-time.
+
+**Key Improvements:**
+- ✨ Live detection box visible during camera preview (not just after capture)
+- 🖐️ **Fully interactive** - drag to move, resize from corners (NEW!)
+- ⏸️ **Auto-pause detection** - stops updating when you touch the box (NEW!)
+- 📐 **Stable tracking** - no more jitter or shaking (NEW!)
+- 🎯 Auto-detection toggle for switching between automatic and manual modes  
+- 🚀 Instant cropping - images are cropped before preview screen
+- 🎨 Polished UI matching the reference design with smooth animations
+- ⚡ Optimized performance with 3 FPS detection for battery efficiency
+
+**New Interactive Features:**
+- Drag the box anywhere to reposition it
+- Grab any corner handle to resize
+- Detection automatically pauses while you adjust
+- Your manual adjustments are saved and used for cropping
+
+See [FEATURES.md](FEATURES.md) for detailed documentation and [GESTURE_GUIDE.md](GESTURE_GUIDE.md) for gesture controls.
 
 ## Features
 
 - 📸 **Camera Integration**: Capture photos using device camera
-- 🎯 **Smart Auto-Detection**: AI-powered text area detection using density analysis
-- ✋ **Manual Adjustment**: Drag and resize crop areas with smooth gestures
+- 🎯 **Real-Time Auto-Detection**: Live detection box that tracks questions as you move the camera (like Brainly)
+- 🖐️ **Interactive Gestures**: Drag to move, resize from corners - fully touch-enabled
+- ⏸️ **Smart Pause**: Detection automatically pauses when you interact with the box
+- 📐 **Stable Tracking**: Threshold-based updates prevent jitter and shaking
+- ⚡ **Instant Cropping**: Automatic crop to detected area before preview - no post-processing needed
+- 🔄 **Auto/Manual Toggle**: Switch between automatic detection and manual mode
+- 🎯 **Bounds Protection**: Box stays within valid area, enforces min/max sizes
+- ✋ **Smooth Animations**: Buttery-smooth 60fps animations using React Native Reanimated
 - 📱 **Cross-Platform**: Works on iOS, Android, and Web
-- 🎨 **Modern UI**: Dark theme with smooth animations
-- 📐 **Precise Cropping**: Real-time preview with accurate image manipulation
+- 🎨 **Modern UI**: Dark theme with clean, professional design matching the reference screenshot
+- 💾 **Adjustment Memory**: Manual changes are saved and used for cropping
 
 ## How to Run Locally
 
@@ -246,18 +274,21 @@ yarn web
 
 ### Key Components
 
-- **CameraScreen**: Handles photo capture and initial processing
-- **PreviewScreen**: Main editing interface with crop overlay and gestures
-- **CropOverlay**: Reusable crop area visualization component
-- **imageUtils**: Text detection algorithms and image processing utilities
+- **CameraScreen**: Real-time detection with live camera preview and auto-detection toggle
+- **AutoDetectionBox**: Animated detection box overlay with smooth transitions
+- **PreviewScreen**: Simplified preview showing already-cropped images
+- **realtimeDetection**: Fast heuristic-based detection algorithms for live preview
+- **imageUtils**: Legacy text detection and image processing utilities
+- **CropOverlay**: Legacy manual crop overlay component
 
 ### Dependencies
 
 - **Expo**: Cross-platform development framework
 - **React Navigation**: Screen navigation
-- **expo-camera**: Camera functionality
+- **expo-camera**: Camera functionality and capture
 - **expo-image-manipulator**: Image processing and cropping
-- **React Native PanResponder**: Gesture handling
+- **react-native-reanimated**: 60fps smooth animations on UI thread
+- **react-native-gesture-handler**: Advanced gesture handling
 - **TypeScript**: Type safety and better development experience
 
 ## Contributing
